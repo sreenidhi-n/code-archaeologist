@@ -1,0 +1,40 @@
+{
+  "name": "code-archaeologist",
+  "version": "1.0.0",
+  "description": "Bob-powered MCP server that excavates legacy codebases using WatsonX Granite",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node test/manual-test.js",
+    "dev": "LOG_LEVEL=debug node src/index.js",
+    "lint": "eslint src/ test/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^5.7.2"
+  },
+  "devDependencies": {
+    "eslint": "^8.56.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "watsonx",
+    "granite",
+    "legacy-code",
+    "code-analysis",
+    "git-history",
+    "dependency-analysis"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}
