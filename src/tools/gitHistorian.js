@@ -37,7 +37,9 @@ async function parseCommitHistory(repoPath) {
     const monthlyCommits = new Map(); // YYYY-MM → count
     let settled = false; // Prevents race condition between timeout and close events
 
-    const git = spawn('git', ['log', '--format=%ae|%an|%ad', '--date=short'], {
+    // Use %aI (strict ISO 8601) instead of --date=short so dates are always UTC-normalized,
+    // avoiding ordering errors on repos with commits from mixed timezones.
+    const git = spawn('git', ['log', '--format=%ae|%an|%aI'], {
       cwd: repoPath,
       stdio: ['ignore', 'pipe', 'ignore']
     });
@@ -76,9 +78,11 @@ async function parseCommitHistory(repoPath) {
         if (!line.trim()) continue;
         const parts = line.split('|');
         if (parts.length < 3) continue;
-        const [rawEmail, rawName, date] = parts;
+        const [rawEmail, rawName, rawDate] = parts;
         const email = rawEmail.toLowerCase().trim();
         const name = rawName.trim();
+        // Normalize ISO 8601 timestamp to YYYY-MM-DD in UTC so lexicographic comparison is valid
+        const date = rawDate ? new Date(rawDate).toISOString().split('T')[0] : null;
         if (!email || !date) continue;
 
         totalCommits++;

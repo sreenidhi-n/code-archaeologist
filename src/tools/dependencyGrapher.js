@@ -1,4 +1,4 @@
-import { readFile, stat } from 'fs/promises';
+import { readFile, stat, access } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, resolve as resolvePath } from 'path';
 import { XMLParser } from 'fast-xml-parser';
@@ -329,11 +329,19 @@ async function checkOSVCVEs(dependencies, ecosystem) {
   return { cveFlags, outdatedFlags };
 }
 
-function detectBuildSystem(repoPath) {
-  if (existsSync(join(repoPath, 'pom.xml'))) return 'maven';
-  if (existsSync(join(repoPath, 'build.gradle')) || existsSync(join(repoPath, 'build.gradle.kts'))) return 'gradle';
-  if (existsSync(join(repoPath, 'package.json'))) return 'npm';
-  if (existsSync(join(repoPath, 'requirements.txt')) || existsSync(join(repoPath, 'setup.py'))) return 'python';
+// Async version avoids blocking the event loop on slow/NFS filesystems.
+// Gradle detection removed — parsing is not implemented, so detecting it misleads callers.
+async function detectBuildSystem(repoPath) {
+  const check = (file) => access(join(repoPath, file)).then(() => true).catch(() => false);
+  const [hasPom, hasPackage, hasRequirements, hasSetup] = await Promise.all([
+    check('pom.xml'),
+    check('package.json'),
+    check('requirements.txt'),
+    check('setup.py')
+  ]);
+  if (hasPom) return 'maven';
+  if (hasPackage) return 'npm';
+  if (hasRequirements || hasSetup) return 'python';
   return 'unknown';
 }
 
@@ -366,7 +374,8 @@ async function parsePomXml(pomPath) {
         groupId: String(d.groupId).trim(),
         artifactId: String(d.artifactId).trim(),
         version: d.version ? String(d.version).trim() : null,
-        scope: d.scope ? String(d.scope).trim() : 'compile'
+        scope: d.scope ? String(d.scope).trim() : 'compile',
+        versionSource: d.version ? 'explicit' : 'inherited'
       }));
   };
 
@@ -454,6 +463,24 @@ function checkMavenCVEs(dependencies) {
   return { cveFlags, outdatedFlags };
 }
 
+// Extract a comparable version from an npm version range string.
+// Handles: ^/~/>=/>/<= prefixes, npm aliases (npm:pkg@ver), x-ranges (1.2.x).
+function parseNpmVersion(versionRange) {
+  if (!versionRange) return versionRange;
+  // npm alias: "npm:other-package@1.2.3" → extract version after last @
+  if (versionRange.startsWith('npm:')) {
+    versionRange = versionRange.split('@').pop();
+  }
+  // Extract first full semver from complex ranges like ">=1.2.3 <2.0.0"
+  const semverMatch = versionRange.match(/(\d+\.\d+\.\d+)/);
+  if (semverMatch) return semverMatch[1];
+  // x-ranges: "1.2.x" → "1.2.0"
+  const xMatch = versionRange.match(/^(\d+\.\d+)\.x/);
+  if (xMatch) return `${xMatch[1]}.0`;
+  // Fallback: strip leading non-numeric prefix, take first token
+  return versionRange.replace(/^[^0-9]*/, '').split(' ')[0] || versionRange;
+}
+
 // Parse package.json for npm dependencies (direct + devDependencies)
 async function parsePackageJson(pkgPath) {
   const raw = await readFile(pkgPath, 'utf-8');
@@ -461,8 +488,7 @@ async function parsePackageJson(pkgPath) {
   const deps = [];
   const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
   for (const [name, versionRange] of Object.entries(allDeps)) {
-    // Strip semver range prefixes: ^1.2.3 → 1.2.3, ~1.2.3 → 1.2.3, >=1.2.3 → 1.2.3
-    const version = versionRange.replace(/^[^0-9]*/, '').split(' ')[0] || versionRange;
+    const version = parseNpmVersion(versionRange);
     deps.push({ name, version, raw: versionRange });
   }
   return deps;
@@ -501,20 +527,27 @@ function checkNpmCVEs(npmDeps) {
   return { cveFlags, outdatedFlags };
 }
 
-function calculateRiskScore(cveFlags) {
+// Single-pass risk analysis — avoids iterating cveFlags multiple times across callers.
+function analyzeRisk(cveFlags) {
   let score = 0;
+  let criticalCount = 0;
+  let highCount = 0;
+  let worst = null;
   for (const cve of cveFlags) {
-    if (cve.severity === 'critical') score += 3;
-    else if (cve.severity === 'high') score += 1.5;
+    if (cve.severity === 'critical') { score += 3; criticalCount++; }
+    else if (cve.severity === 'high') { score += 1.5; highCount++; }
     else if (cve.severity === 'medium') score += 0.5;
+    if (!worst || cve.cvss > worst.cvss) worst = cve;
   }
-  return Math.min(10, Math.round(score * 10) / 10);
+  return { score: Math.min(10, Math.round(score * 10) / 10), criticalCount, highCount, worst };
+}
+
+function calculateRiskScore(cveFlags) {
+  return analyzeRisk(cveFlags).score;
 }
 
 function buildTemplateNarrative(deps, cveFlags, riskScore) {
-  const criticalCount = cveFlags.filter(c => c.severity === 'critical').length;
-  const highCount = cveFlags.filter(c => c.severity === 'high').length;
-  const worst = [...cveFlags].sort((a, b) => b.cvss - a.cvss)[0];
+  const { criticalCount, highCount, worst } = analyzeRisk(cveFlags);
 
   let n = `This dependency tree contains ${deps.length} dependencies with a risk score of ${riskScore}/10.`;
   if (criticalCount > 0) {
@@ -539,7 +572,7 @@ export async function dependencyGrapher({ repoPath, buildFilePath }) {
   }
 
   try {
-    const buildSystem = detectBuildSystem(repoPath);
+    const buildSystem = await detectBuildSystem(repoPath);
     logger.info('Build system detected', { buildSystem });
 
     let dependencies = [];
